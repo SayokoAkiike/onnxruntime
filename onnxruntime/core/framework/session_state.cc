@@ -13,6 +13,7 @@
 #include "core/common/parse_string.h"
 #endif
 
+#include "core/common/hash_combine.h"
 #include "core/common/logging/logging.h"
 #include "core/common/safeint.h"
 #include "core/flatbuffers/schema/ort.fbs.h"
@@ -937,11 +938,18 @@ Status SessionState::PrepackConstantInitializedTensors(
 
 static int64_t
 CalculateMemoryPatternsKey(const gsl::span<const OrtValue>& tensor_inputs) {
-  int64_t key = 0;
+  // Combine the rank and the dims of each input in order, so that different shapes, e.g. permuted dims or two inputs
+  // of the same shape, do not get the same key. A hash collision is still safe: ExecutionFrame checks the size of each
+  // block and falls back to a separate allocation if it does not match.
+  size_t key = 0;
   for (const auto& input : tensor_inputs) {
-    for (auto dim : input.Get<Tensor>().Shape().GetDims()) key ^= dim;
+    const auto dims = input.Get<Tensor>().Shape().GetDims();
+    HashCombine(dims.size(), key);
+    for (auto dim : dims) {
+      HashCombine(dim, key);
+    }
   }
-  return key;
+  return static_cast<int64_t>(key);
 }
 
 #ifdef ENABLE_TRAINING
