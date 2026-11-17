@@ -470,6 +470,43 @@ TEST_F(ExecutionFrameTest, MemPatternTest) {
   ASSERT_EQ(p->GetBlock(4)->offset_, kAllocAlignment);
 }
 
+// The memory pattern cache is keyed by the input shapes. Shapes that differ must not share a cached
+// pattern, otherwise the pattern of one shape is used for the other and every block fails the size check.
+TEST(ExecutionFrameTestInit, MemPatternCacheDistinguishesInputShapes) {
+  SessionOptions so;
+  InferenceSessionWrapper session(so, GetEnvironment());
+  ASSERT_STATUS_OK(session.Load(ORT_TSTR("testdata/mul_1.onnx")));
+  ASSERT_STATUS_OK(session.Initialize());
+  const SessionState& state = session.GetSessionState();
+
+  auto make_inputs = [](std::initializer_list<std::vector<int64_t>> shapes) {
+    std::vector<OrtValue> inputs;
+    for (const auto& dims : shapes) {
+      OrtValue value;
+      Tensor::InitOrtValue(DataTypeImpl::GetType<float>(), TensorShape(dims), CPUAllocator::DefaultInstance(),
+                           value);
+      inputs.push_back(std::move(value));
+    }
+    return inputs;
+  };
+
+  const auto cached_inputs = make_inputs({{4, 4}, {4, 4}});
+  ASSERT_STATUS_OK(state.UpdateMemoryPatternGroupCache(cached_inputs, MemoryPatternGroup{}));
+
+  const InlinedHashMap<int, TensorShape>* inferred_shapes = nullptr;
+  const MemoryPatternGroup* cached = state.GetMemoryPatternGroup(cached_inputs, {}, inferred_shapes);
+  ASSERT_NE(cached, nullptr);
+  EXPECT_EQ(state.GetMemoryPatternGroup(make_inputs({{4, 4}, {4, 4}}), {}, inferred_shapes), cached);
+
+  // Each of these used to get the same key as {4, 4}, {4, 4}.
+  for (const auto& inputs : {make_inputs({{8, 8}, {8, 8}}),  // two inputs of the same shape
+                             make_inputs({{2, 6}, {6, 2}}),  // dims in another order
+                             make_inputs({{4, 4}}),          // fewer inputs
+                             make_inputs({{1, 2, 3}})}) {    // another rank
+    EXPECT_NE(state.GetMemoryPatternGroup(inputs, {}, inferred_shapes), cached);
+  }
+}
+
 #ifdef ENABLE_TRAINING
 TEST_F(ExecutionFrameTest, MemPatternWithExternalOutputsTest) {
   auto cpu_xp = CreateCPUExecutionProvider();
